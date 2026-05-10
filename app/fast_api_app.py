@@ -31,7 +31,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.app_utils.telemetry import setup_telemetry
 from app.app_utils.typing import Feedback
-from app.agent import send_daily_brief, generate_daily_brief, send_to_slack
+from app.agent import send_daily_brief, generate_daily_brief
 
 setup_telemetry()
 _, project_id = google.auth.default()

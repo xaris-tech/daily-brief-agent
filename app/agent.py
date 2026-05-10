@@ -13,14 +13,17 @@
 # limitations under the License.
 
 """
-Daily Brief Agent - Fetches Slack mentions, Gmail, and Calendar to send daily summary.
+Daily Brief Agent - Fetches Slack mentions, Gmail, and Calendar to send daily summary via email.
 
 This agent runs on a cron schedule (default: 8am daily) and sends a personalized
-daily brief to the user via Slack.
+daily brief to the user via email.
 """
 
 import datetime
 import os
+import base64
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from zoneinfo import ZoneInfo
 
 from google.adk.agents import Agent
@@ -42,80 +45,96 @@ os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
 # Environment variables (set these in .env or environment)
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
-SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET", "")
-SLACK_USER_ID = os.environ.get("SLACK_USER_ID", "")  # Your Slack user ID
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")  # OAuth client secret
+USER_EMAIL = os.environ.get("USER_EMAIL", "")  # Your email to send the brief to
 USER_TIMEZONE = os.environ.get("USER_TIMEZONE", "America/New_York")
 
 
 def get_slack_mentions() -> str:
-    """Fetch all Slack messages where you were mentioned.
+    """Fetch Slack messages with mentions/urgents.
     
-    Returns a formatted summary of all mentions.
+    Returns a formatted summary of important mentions.
     """
-    if not SLACK_BOT_TOKEN:
-        return "Error: SLACK_BOT_TOKEN not configured. Please set the SLACK_BOT_TOKEN environment variable."
+    token = os.environ.get("SLACK_BOT_TOKEN", "")
+    if not token:
+        return "Slack: Not configured (add SLACK_BOT_TOKEN to enable)."
     
     try:
         from slack_sdk import WebClient
-        from slack_sdk.errors import SlackApiError
+        client = WebClient(token=token)
         
-        client = WebClient(token=SLACK_BOT_TOKEN)
-        
-        # Get mentions using conversations.history and search.messages
-        # First, try to get recent messages from your DMs and channels
         mentions = []
+        response = client.conversations_list(types="public_channel,private_channel,im,mpim")
+        channels = response["channels"]
         
-        # Use conversations.list to get all channels
-        try:
-            response = client.conversations_list(types="public_channel,private_channel,im,mpim")
-            channels = response["channels"]
-            
-            for channel in channels[:20]:  # Limit to first 20 channels
-                try:
-                    history = client.conversations_history(
-                        channel=channel["id"],
-                        limit=100,
-                        inclusive=True,
-                        oldest="0",  # Last 24 hours
-                    )
-                    
-                    for msg in history["messages"]:
-                        if msg.get("subtype") == "message":
-                            text = msg.get("text", "")
-                            # Check if user was mentioned
-                            if f"<@{SLACK_USER_ID}>" in text or f"<@{SLACK_USER_ID}|" in text:
-                                user_info = client.users_info(user=msg.get("user", ""))
-                                user_name = user_info["user"]["real_name"] if user_info["ok"] else msg.get("user", "Unknown")
-                                mentions.append({
-                                    "user": user_name,
-                                    "text": text,
-                                    "ts": msg.get("ts"),
-                                    "channel": channel["name"] if channel.get("name") else "DM"
-                                })
-                except SlackApiError:
-                    continue
-                    
-        except SlackApiError as e:
-            return f"Slack API Error: {e}"
-        
+        for channel in channels[:20]:
+            try:
+                history = client.conversations_history(
+                    channel=channel["id"],
+                    limit=100,
+                )
+                
+                for msg in history["messages"]:
+                    if msg.get("type") == "message":
+                        text = msg.get("text", "")
+                        if "@here" in text or "@channel" in text or "urgent" in text.lower():
+                            user_info = client.users_info(user=msg.get("user", ""))
+                            user_name = user_info["user"]["real_name"] if user_info["ok"] else "Unknown"
+                            mentions.append({
+                                "user": user_name,
+                                "text": text[:200],
+                                "channel": channel.get("name", "DM")
+                            })
+            except Exception:
+                continue
+                
         if not mentions:
-            return "No mentions found in the last 24 hours."
+            return "No urgent mentions in the last 24 hours."
         
-        # Format the response
-        result = "📢 **Your Slack Mentions (Last 24h):**\n\n"
-        for m in mentions[:10]:  # Limit to 10
-            result += f"• **{m['user']}** in {m['channel']}: {m['text'][:200]}\n"
+        result = "**Slack Mentions:**\n\n"
+        for m in mentions[:5]:
+            result += f"- {m['user']} in {m['channel']}: {m['text']}\n"
         
         return result
         
-    except ImportError:
-        return "Error: slack-sdk not installed. Run: pip install slack-sdk"
     except Exception as e:
-        return f"Error fetching Slack mentions: {str(e)}"
-    finally:
-        pass
+        return f"Slack: {str(e)}"
+        mentions = []
+        response = client.conversations_list(types="public_channel,private_channel,im,mpim")
+        channels = response["channels"]
+        
+        for channel in channels[:20]:
+            try:
+                history = client.conversations_history(
+                    channel=channel["id"],
+                    limit=100,
+                )
+                
+                for msg in history["messages"]:
+                    if msg.get("type") == "message":
+                        text = msg.get("text", "")
+                        # Check for mentions (basic check)
+                        if "@here" in text or "@channel" in text or "urgent" in text.lower():
+                            user_info = client.users_info(user=msg.get("user", ""))
+                            user_name = user_info["user"]["real_name"] if user_info["ok"] else "Unknown"
+                            mentions.append({
+                                "user": user_name,
+                                "text": text[:200],
+                                "channel": channel.get("name", "DM")
+                            })
+            except Exception:
+                continue
+                
+        if not mentions:
+            return "No urgent mentions in the last 24 hours."
+        
+        result = "**Slack Mentions:**\n\n"
+        for m in mentions[:5]:
+            result += f"- {m['user']} in {m['channel']}: {m['text']}\n"
+        
+        return result
+        
+    except Exception as e:
+        return f"Slack: {str(e)}"
 
 
 def get_gmail() -> str:
@@ -126,19 +145,13 @@ def get_gmail() -> str:
     try:
         from googleapiclient.discovery import build
         from google.auth import credentials
-        from oauthlib.oauth2.rfc6749.parameters import TokenError
         
-        # Try to get credentials
-        try:
-            creds, _ = google.auth.default(scopes=[
-                "https://www.googleapis.com/auth/gmail.readonly"
-            ])
-        except TokenError:
-            return "Error: No Google credentials found. Please authenticate via 'gcloud auth application-default login'"
+        creds, _ = google.auth.default(scopes=[
+            "https://www.googleapis.com/auth/gmail.readonly"
+        ])
         
         service = build("gmail", "v1", credentials=creds)
         
-        # Get messages
         results = service.users().messages().list(
             userId="me",
             q="is:unread OR label:important",
@@ -150,10 +163,9 @@ def get_gmail() -> str:
         if not messages:
             return "No recent important emails."
         
-        # Get message details
-        email_summary = "📧 **Recent Important Emails:**\n\n"
+        email_summary = "**Recent Important Emails:**\n\n"
         
-        for msg in messages[:10]:
+        for msg in messages[:5]:
             msg_detail = service.users().messages().get(
                 userId="me",
                 id=msg["id"],
@@ -164,16 +176,12 @@ def get_gmail() -> str:
             subject = next((h["value"] for h in headers if h["name"] == "Subject"), "(No Subject)")
             from_addr = next((h["value"] for h in headers if h["name"] == "From"), "Unknown")
             
-            email_summary += f"• **{subject}**\n  From: {from_addr[:80]}\n"
+            email_summary += f"- {subject[:60]}... | From: {from_addr[:40]}\n"
         
         return email_summary
         
-    except ImportError:
-        return "Error: google-api-python-client not installed."
     except Exception as e:
-        return f"Error fetching Gmail: {str(e)}"
-    finally:
-        pass
+        return f"Gmail: {str(e)}"
 
 
 def get_calendar() -> str:
@@ -184,19 +192,13 @@ def get_calendar() -> str:
     try:
         from googleapiclient.discovery import build
         from google.auth import credentials
-        from oauthlib.oauth2.rfc6749.parameters import TokenError
         
-        # Try to get credentials
-        try:
-            creds, _ = google.auth.default(scopes=[
-                "https://www.googleapis.com/auth/calendar.readonly"
-            ])
-        except TokenError:
-            return "Error: No Google credentials found. Please authenticate via 'gcloud auth application-default login'"
+        creds, _ = google.auth.default(scopes=[
+            "https://www.googleapis.com/auth/calendar.readonly"
+        ])
         
         service = build("calendar", "v3", credentials=creds)
         
-        # Get today's date range
         tz = ZoneInfo(USER_TIMEZONE)
         now = datetime.datetime.now(tz)
         start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -213,16 +215,14 @@ def get_calendar() -> str:
         event_list = events.get("items", [])
         
         if not event_list:
-            return "📅 **Today's Calendar:** No events scheduled."
+            return "**Today's Calendar:** No events scheduled."
         
-        # Format events
-        calendar_summary = "📅 **Today's Meetings:**\n\n"
+        calendar_summary = "**Today's Meetings:**\n\n"
         
-        for event in event_list:
+        for event in event_list[:10]:
             start = event.get("start", {}).get("dateTime", event.get("start", {}).get("date", "All day"))
-            summary = event.get("summary", "Untitled event")
+            summary = event.get("summary", "Untitled")
             
-            # Parse time
             if "T" in start:
                 event_dt = datetime.datetime.fromisoformat(start.replace("Z", "+00:00"))
                 event_dt = event_dt.astimezone(tz)
@@ -230,111 +230,112 @@ def get_calendar() -> str:
             else:
                 time_str = "All day"
             
-            # Get attendees
             attendees = event.get("attendees", [])
-            attendee_names = [a.get("displayName", a.get("email", "").split("@")[0]) for a in attendees if a.get("displayName") or a.get("email")]
+            attendee_names = [a.get("displayName", a.get("email", "").split("@")[0]) for a in attendees if a.get("displayName") or a.get("email")][:3]
             
-            calendar_summary += f"• **{time_str}** - {summary}\n"
+            calendar_summary += f"- {time_str} | {summary[:40]}"
             if attendee_names:
-                calendar_summary += f"  With: {', '.join(attendee_names[:5])}\n"
+                calendar_summary += f" (with {', '.join(attendee_names)})"
+            calendar_summary += "\n"
         
         return calendar_summary
         
-    except ImportError:
-        return "Error: google-api-python-client not installed."
     except Exception as e:
-        return f"Error fetching Calendar: {str(e)}"
-    finally:
-        pass
+        return f"Calendar: {str(e)}"
 
 
-def send_to_slack(message: str, channel: str = None) -> str:
-    """Send a message to Slack.
+def send_email(subject: str, body: str) -> str:
+    """Send an email via Gmail API.
     
     Args:
-        message: The message to send to Slack.
-        channel: The Slack channel or user ID to send to. Defaults to the user's own DM.
+        subject: Email subject line
+        body: Email body content
     
     Returns: Confirmation message.
     """
-    if not SLACK_BOT_TOKEN:
-        return "Error: SLACK_BOT_TOKEN not configured."
+    if not USER_EMAIL:
+        return "Error: USER_EMAIL not set in .env"
     
     try:
-        from slack_sdk import WebClient
-        from slack_sdk.errors import SlackApiError
+        from googleapiclient.discovery import build
+        from google.auth import credentials
         
-        client = WebClient(token=SLACK_BOT_TOKEN)
+        creds, _ = google.auth.default(scopes=[
+            "https://www.googleapis.com/auth/gmail.send"
+        ])
         
-        # Determine channel - use user's ID or passed channel
-        target_channel = channel or SLACK_USER_ID
-        if not target_channel:
-            return "Error: No target channel or SLACK_USER_ID specified."
+        service = build("gmail", "v1", credentials=creds)
         
-        # Send message
-        response = client.chat_postMessage(
-            channel=target_channel,
-            text=message,
-            unfurl_links=False
-        )
+        # Create email message
+        message = MIMEMultipart()
+        message["To"] = USER_EMAIL
+        message["Subject"] = subject
         
-        if response["ok"]:
-            return "✅ Message sent to Slack successfully!"
-        else:
-            return f"❌ Failed to send message: {response}"
-            
-    except SlackApiError as e:
-        return f"❌ Slack API Error: {e}"
+        # Attach plain text body
+        message.attach(MIMEText(body, "plain"))
+        
+        # Encode and send
+        encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+        
+        send_result = service.users().messages().send(
+            userId="me",
+            body={"raw": encoded_message}
+        ).execute()
+        
+        return f"Email sent to {USER_EMAIL}"
+        
     except Exception as e:
-        return f"❌ Error sending to Slack: {str(e)}"
-    finally:
-        pass
+        return f"Error sending email: {str(e)}"
 
 
 def generate_daily_brief() -> str:
     """Generate the daily brief by fetching all data sources.
     
-    Combines Slack mentions, Gmail, and Calendar into a daily summary.
+    Combines Calendar, Slack, and Gmail into a daily summary.
     """
-    # Get current date/time
     tz = ZoneInfo(USER_TIMEZONE)
     now = datetime.datetime.now(tz)
     date_str = now.strftime("%A, %B %d, %Y")
     
-    # Build the brief
-    brief = f"🌟 **Your Daily Brief - {date_str}**\n\n"
+    brief = f"Your Daily Brief - {date_str}\n"
+    brief += "=" * 30 + "\n\n"
     
-    # Get calendar (most important - shows meetings first)
+    # Calendar (most important)
     brief += get_calendar() + "\n\n"
     
-    # Get Slack mentions
+    # Slack mentions
     brief += get_slack_mentions() + "\n\n"
     
-    # Get Gmail
+    # Gmail
     brief += get_gmail() + "\n\n"
     
-    # Add goals section (the agent will help fill this in)
-    brief += "---" + "\n\n"
-    brief += "🎯 **Today's Goals:**\n"
-    brief += "_Think about what you want to accomplish today._\n"
+    brief += "-" * 30 + "\n\n"
+    brief += "Today's Goals:\n"
+    brief += "_What do you want to accomplish today?_\n"
     
     return brief
 
 
 def send_daily_brief() -> str:
-    """Generate and send the daily brief to Slack.
+    """Generate and send the daily brief via email.
     
     This is the main function that pulls everything together.
     """
+    tz = ZoneInfo(USER_TIMEZONE)
+    now = datetime.datetime.now(tz)
+    date_str = now.strftime("%B %d, %Y")
+    
     brief = generate_daily_brief()
-    return send_to_slack(brief)
+    subject = f"Daily Brief - {date_str}"
+    
+    return send_email(subject, brief)
 
 
 # Wrap functions as ADK tools
 get_slack_mentions_tool = FunctionTool(func=get_slack_mentions)
 get_gmail_tool = FunctionTool(func=get_gmail)
 get_calendar_tool = FunctionTool(func=get_calendar)
-send_to_slack_tool = FunctionTool(func=send_to_slack)
+send_email_tool = FunctionTool(func=send_email)
 generate_daily_brief_tool = FunctionTool(func=generate_daily_brief)
 send_daily_brief_tool = FunctionTool(func=send_daily_brief)
 
@@ -348,22 +349,22 @@ root_agent = Agent(
     instruction="""You are a Daily Brief Agent designed to help the user start their day organized.
 
 You have access to several tools:
-- get_slack_mentions: Fetch Slack messages where the user was mentioned
-- get_gmail: Fetch recent important emails
 - get_calendar: Fetch today's calendar events  
-- send_to_slack: Send a message to Slack
-- generate_daily_brief: Generate a complete daily brief combining all sources
-- send_daily_brief: Generate and send the daily brief to Slack
+- get_gmail: Fetch recent important emails
+- get_slack_mentions: Fetch important Slack messages
+- send_email: Send an email via Gmail
+- generate_daily_brief: Generate a complete daily brief
+- send_daily_brief: Generate and email the daily brief
 
 When the user asks for their "daily brief", "morning update", or "day summary", use generate_daily_brief 
-or individually fetch the data and present it in a friendly, organized format.
+or send_daily_brief to email it to them.
 
-Always be helpful, concise, and action-oriented. Highlight what's important and what needs attention.""",
+Always be helpful, concise, and action-oriented. Highlight meetings and important items.""",
     tools=[
-        get_slack_mentions_tool,
-        get_gmail_tool,
         get_calendar_tool,
-        send_to_slack_tool,
+        get_gmail_tool,
+        get_slack_mentions_tool,
+        send_email_tool,
         generate_daily_brief_tool,
         send_daily_brief_tool,
     ],
